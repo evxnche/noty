@@ -5,3 +5,16 @@ build/
 Sparkle/
 sparkle_keys/
 appcast.xml.bak
+
+# Local secrets and deploy state (never commit)
+.env
+.env.*
+!.env.example
+.vercel/
+node_modules/
+web/.data/
+
+# Agent / tool state
+.omx/
+.agents/
+skills-lock.json
