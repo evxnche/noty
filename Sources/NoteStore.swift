@@ -42,16 +42,25 @@ final class NoteStore: ObservableObject {
         n.title = Note.derivedTitle(from: body)
         notes.append(n)
         store.upsert(n)
+        TaskSync.shared.localChanged()
         return n
+    }
+
+    func setTitle(id: String, title: String) {
+        guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[i].applyTypedTitle(title)
+        notes[i].modified = Date()
+        store.upsert(notes[i])
+        TaskSync.shared.localChanged()
     }
 
     func updateBody(id: String, body: String) {
         guard let i = notes.firstIndex(where: { $0.id == id }) else { return }
         guard notes[i].body != body else { return }
-        notes[i].body = body
-        notes[i].title = Note.derivedTitle(from: body)
+        notes[i].applyBody(body)
         notes[i].modified = Date()
         store.upsert(notes[i])
+        TaskSync.shared.localChanged()
     }
 
     func togglePin(id: String) {
@@ -80,6 +89,7 @@ final class NoteStore: ObservableObject {
         notes[i].modified = Date()
         if !archived { notes[i].order = (active.map(\.order).min() ?? 0) - 1 }
         store.upsert(notes[i])
+        TaskSync.shared.localChanged()
     }
 
     /// Removes the note but keeps it recoverable for ten seconds.
@@ -88,6 +98,7 @@ final class NoteStore: ObservableObject {
         let doomed = notes[i]
         notes.remove(at: i)
         store.delete(id: id)
+        TaskSync.shared.localChanged()
         pendingUndo = PendingDelete(note: doomed, deadline: Date().addingTimeInterval(10))
         undoTimer?.invalidate()
         undoTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
@@ -101,6 +112,7 @@ final class NoteStore: ObservableObject {
         notes.append(p.note)
         store.upsert(p.note)
         pendingUndo = nil
+        TaskSync.shared.localChanged()
     }
 
     func move(id: String, before otherID: String?) {
@@ -131,22 +143,39 @@ final class NoteStore: ObservableObject {
             store.upsert(n)
             added += 1
         }
+        TaskSync.shared.localChanged()
         return added
+    }
+
+    /// The sync ledger retains current edits and makes explicit deletions only.
+    func persistedNotes() -> [Note] { store.load() }
+
+    @discardableResult
+    func applySynced(_ incoming: [Note]) -> Bool {
+        guard store.applySync(incoming, replacing: store.load()) else { return false }
+        if incoming != notes { notes = incoming }
+        return true
     }
 
     private func seedWelcomeNote() {
         create(body: """
-        Welcome to Noty
+        # Welcome to Noty
 
-        Your notes live at the edge of the screen. Slide the pointer to the \
-        right edge and the deck fans out.
+        Your notes live at the bottom edge of the screen. Slide the pointer to
+        the bottom edge and the deck fans out.
+
+        This line started with a #, which is what a header looks like — set in
+        Departure Mono, while the body is IBM Plex Mono.
 
         ⌥⌘N  new note
         ⌥⌘A  all notes
         ⌥⌘L  archive
 
-        Inside a note: Esc closes, ⌘F finds, ⌘. cycles the colour, \
-        ⌘⌫ deletes with ten seconds to undo.
+        Inside a note: Esc closes, ⌘F finds, ⌘. cycles the shade, ⌘⌫ deletes
+        with ten seconds to undo.
+
+        Type a line that says just “list” and the note becomes a tasklist —
+        click a checkbox to tick it off. Say “list” again to strip them back off.
         """, color: 0)
     }
 }

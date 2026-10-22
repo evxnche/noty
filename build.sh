@@ -8,7 +8,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/build/Noty.app"
+# Override when iCloud's File Provider keeps restamping signing metadata.
+APP="${NOTY_BUILD_DIR:-$ROOT/build}/Noty.app"
 SDK="$(xcrun --show-sdk-path --sdk macosx)"
 MODE="${1:-release}"
 
@@ -46,11 +47,21 @@ cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 [ -f "$ROOT/Resources/AppIcon.icns" ] && cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/"
+# Bundled faces (IBM Plex Mono, Departure Mono) — registered at launch by FontLoader.
+# Their licences travel with the app, as both require.
+if [ -d "$ROOT/Resources/Fonts" ]; then
+    cp -R "$ROOT/Resources/Fonts" "$APP/Contents/Resources/Fonts"
+fi
 # Sparkle is MIT; redistributing its framework means shipping its notice too.
 [ -f "$ROOT/LICENSE" ] && cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
 [ -f "$ROOT/licenses/THIRD-PARTY.txt" ] && cp "$ROOT/licenses/THIRD-PARTY.txt" "$APP/Contents/Resources/"
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+
+# A File Provider filesystem (iCloud Desktop & Documents) stamps extended
+# attributes on everything it touches, and codesign refuses to sign a bundle
+# that carries them.
+xattr -cr "$APP" 2>/dev/null || true
 
 # Sparkle ships signed by its own team and dyld refuses to load a framework whose
 # Team ID differs from the process — so it has to be re-signed with our identity,

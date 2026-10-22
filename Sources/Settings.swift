@@ -10,9 +10,17 @@ enum Settings {
         set { d.set(newValue, forKey: "showOverFullScreen") }
     }
 
-    static var deckOnLeftEdge: Bool {
-        get { d.bool(forKey: "deckOnLeftEdge") }
-        set { d.set(newValue, forKey: "deckOnLeftEdge") }
+    /// Which screen edge the deck is docked to. Defaults to the bottom; the old
+    /// left-edge boolean migrates, and anything else lands on the bottom edge.
+    static var deckEdge: DeckEdge {
+        get {
+            if let raw = d.string(forKey: "deckEdge"), let edge = DeckEdge(rawValue: raw) {
+                return edge
+            }
+            if d.object(forKey: "deckOnLeftEdge") as? Bool == true { return .left }
+            return .bottom
+        }
+        set { d.set(newValue.rawValue, forKey: "deckEdge") }
     }
 
     /// Max tabs the fan shows before collapsing the remainder into "+N".
@@ -36,15 +44,25 @@ enum Settings {
     }
 
     /// PostScript name of the face note bodies are set in; empty means the
-    /// system font. Defaults to a hand, the way a sticky note actually looks.
+    /// system font. This fork migrates existing installs to bundled IBM Plex
+    /// Mono once; choices made through the font menu after that are preserved.
     static var noteFontName: String {
         get {
-            if let v = d.string(forKey: "noteFontName") { return v }
-            // migrate the old boolean
-            let hand = d.object(forKey: "handwrittenBody") as? Bool ?? true
-            return hand ? "Noteworthy-Light" : ""
+            if !d.bool(forKey: "didMigrateToPlexBody") {
+                d.set(true, forKey: "didMigrateToPlexBody")
+                d.set(Ink.plexBody, forKey: "noteFontName")
+                return Ink.plexBody
+            }
+            return d.string(forKey: "noteFontName") ?? Ink.plexBody
         }
         set { d.set(newValue, forKey: "noteFontName") }
+    }
+
+    /// Type an opening bracket and its closing half appears after the caret.
+    /// On by default, the way ezwrite ships it.
+    static var autoPairBrackets: Bool {
+        get { d.object(forKey: "autoPairBrackets") as? Bool ?? true }
+        set { d.set(newValue, forKey: "autoPairBrackets") }
     }
 
     /// How long the deck may sit untouched before it tidies itself away.

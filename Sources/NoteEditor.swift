@@ -80,6 +80,24 @@ final class EditorBridge: ObservableObject {
 /// Text view that treats a leading ☐ / ☑ as a real checkbox: clicking the box
 /// toggles it, Return carries the list on, and finished lines get struck through.
 final class TaskTextView: NSTextView {
+    override func paste(_ sender: Any?) {
+        let board = NSPasteboard.general
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty, urls.allSatisfy({ NSImage(contentsOf: $0) != nil }) {
+            insertPhotos(urls)
+            return
+        }
+        if let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
+            do {
+                let link = try Photos.save(png, extension: "png")
+                insertText("\n" + link + "\n", replacementRange: selectedRange())
+            } catch { NSAlert(error: error).runModal() }
+            return
+        }
+        super.paste(sender)
+    }
+
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -170,15 +188,14 @@ struct NoteTextView: NSViewRepresentable {
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
-        tv.isContinuousSpellCheckingEnabled = true
+        tv.isAutomaticSpellingCorrectionEnabled = false
+        tv.isContinuousSpellCheckingEnabled = false
         tv.string = text
 
         scroll.documentView = tv
         bridge.textView = tv
-        Self.styleTasks(tv, ink: ink, size: fontSize)
-        if autofocus {
-            DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
-        }
+        Self.restyle(tv, ink: ink, size: fontSize)
+        if autofocus { Self.retryFocus(tv, remaining: 8) }
         return scroll
     }
 
@@ -186,25 +203,45 @@ struct NoteTextView: NSViewRepresentable {
         guard let tv = scroll.documentView as? NSTextView else { return }
         if tv.string != text {
             tv.string = text
-            Self.styleTasks(tv, ink: ink, size: fontSize)
+            Self.restyle(tv, ink: ink, size: fontSize)
         }
         let want = Self.bodyFont(fontSize)
         if tv.textColor != ink || tv.font != want {
             tv.textColor = ink
             tv.insertionPointColor = ink
             tv.font = want
-            Self.styleTasks(tv, ink: ink, size: fontSize)
+            Self.restyle(tv, ink: ink, size: fontSize)
         }
         if bridge.textView !== tv { bridge.textView = tv }
     }
 
-    /// Dim and strike through anything already ticked off.
+    /// ⌥⌘N creates the editor before the panel has become key. One async
+    /// `makeFirstResponder` is a no-op in that window; keep trying briefly.
+    /// Stop if some other text field (the find bar) already has focus.
+    static func retryFocus(_ tv: NSTextView, remaining: Int) {
+        DispatchQueue.main.async {
+            guard remaining > 0 else { return }
+            if let fr = tv.window?.firstResponder, fr !== tv,
+               fr is NSTextView || fr is NSTextField { return }
+            tv.window?.makeKeyAndOrderFront(nil)
+            _ = tv.window?.makeFirstResponder(tv)
+            if tv.window?.isKeyWindow == true, tv.window?.firstResponder === tv { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                retryFocus(tv, remaining: remaining - 1)
+            }
+        }
+    }
+
+    /// The note's plain-text styling pass: body face everywhere, header lines
+    /// redrawn in the header face a step larger, and anything already ticked off
+    /// dimmed and struck through.
+    ///
     /// Restyling touches the whole document, which happens on every keystroke.
     /// Two things make that safe: the caret has to be put back afterwards, and
     /// `typingAttributes` has to be refreshed — otherwise the next character is
     /// inserted in the *previous* font and immediately rewritten, which reads as
     /// the text jumping under the cursor after a font or size change.
-    static func styleTasks(_ tv: NSTextView, ink: NSColor, size: CGFloat = 13.5) {
+    static func restyle(_ tv: NSTextView, ink: NSColor, size: CGFloat = 13.5) {
         let font = bodyFont(size)
         tv.typingAttributes = [.font: font, .foregroundColor: ink]
 
@@ -218,11 +255,17 @@ struct NoteTextView: NSViewRepresentable {
         storage.addAttribute(.font, value: font, range: full)
         let ns = storage.string as NSString
         ns.enumerateSubstrings(in: full, options: .byLines) { sub, range, _, _ in
-            guard let sub, Tasks.marker(of: sub) == Tasks.done else { return }
-            storage.addAttribute(.strikethroughStyle,
-                                 value: NSUnderlineStyle.single.rawValue, range: range)
-            storage.addAttribute(.foregroundColor,
-                                 value: ink.withAlphaComponent(0.45), range: range)
+            guard let sub else { return }
+            if let level = Headers.level(of: sub) {
+                storage.addAttribute(.font,
+                                     value: Ink.headerFont(level: level, size: size),
+                                     range: range)
+            } else if Tasks.marker(of: sub) == Tasks.done {
+                storage.addAttribute(.strikethroughStyle,
+                                     value: NSUnderlineStyle.single.rawValue, range: range)
+                storage.addAttribute(.foregroundColor,
+                                     value: ink.withAlphaComponent(0.45), range: range)
+            }
         }
         storage.endEditing()
         let end = (storage.string as NSString).length
@@ -233,35 +276,151 @@ struct NoteTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         let parent: NoteTextView
+        /// Set while the delegate itself is rewriting the note — the `list`
+        /// keyword, a task or list carrying on — so the text-did-change those
+        /// trigger cannot re-trigger the keyword mid-rewrite.
+        private var applyingRewrite = false
+
         init(_ p: NoteTextView) { parent = p }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
-            NoteTextView.styleTasks(tv, ink: parent.ink, size: parent.fontSize)
+            if !applyingRewrite { applyListKeywordIfTyped(tv) }
+            NoteTextView.restyle(tv, ink: parent.ink, size: parent.fontSize)
             parent.text = tv.string
         }
 
-        /// Return on a task line starts the next task; on an empty one, ends the list.
+        /// Typing a line that says just "list" turns the note into a tasklist
+        /// (or strips it back to prose when it already is one). One edit, so one
+        /// ⌘Z undoes the whole conversion.
+        private func applyListKeywordIfTyped(_ tv: NSTextView) {
+            guard let result = Tasks.listTransform(text: tv.string,
+                                                   caret: tv.selectedRange().location) else { return }
+            applyingRewrite = true
+            let full = NSRange(location: 0, length: (tv.string as NSString).length)
+            if tv.shouldChangeText(in: full, replacementString: result.text) {
+                tv.textStorage?.replaceCharacters(in: full, with: result.text)
+                tv.didChangeText()
+                let end = (result.text as NSString).length
+                let caret = NSRange(location: min(result.caret, end), length: 0)
+                tv.setSelectedRange(caret)
+                tv.scrollRangeToVisible(caret)
+            }
+            applyingRewrite = false
+        }
+
+        /// Return on a task line starts the next task; on an empty one, ends the
+        /// list. Plain lists — bullets and numbered items — carry themselves on
+        /// the same way, numbers counting up. An opening bracket types together
+        /// with its closing half.
         func textView(_ tv: NSTextView, shouldChangeTextIn range: NSRange,
                       replacementString replacement: String?) -> Bool {
+            if pairBracketIfTyped(tv, range: range, replacement: replacement) { return false }
+
             guard replacement == "\n" else { return true }
             let ns = tv.string as NSString
             guard range.location <= ns.length else { return true }
             let line = ns.lineRange(for: NSRange(location: range.location, length: 0))
             let text = ns.substring(with: line)
-            guard Tasks.isTask(text) else { return true }
 
-            if Tasks.stripped(text.trimmingCharacters(in: .newlines)).isEmpty {
-                let clear = NSRange(location: line.location,
-                                    length: min(line.length, ns.length - line.location))
-                if tv.shouldChangeText(in: clear, replacementString: "") {
-                    tv.textStorage?.replaceCharacters(in: clear, with: "")
-                    tv.didChangeText()
+            if Tasks.isTask(text) {
+                if Tasks.stripped(text.trimmingCharacters(in: .newlines)).isEmpty {
+                    let clear = NSRange(location: line.location,
+                                        length: min(line.length, ns.length - line.location))
+                    applyingRewrite = true
+                    defer { applyingRewrite = false }
+                    if tv.shouldChangeText(in: clear, replacementString: "") {
+                        tv.textStorage?.replaceCharacters(in: clear, with: "")
+                        tv.didChangeText()
+                    }
+                    return false
                 }
+                applyingRewrite = true
+                defer { applyingRewrite = false }
+                tv.insertText("\n" + Tasks.openPrefix, replacementRange: range)
                 return false
             }
-            tv.insertText("\n" + Tasks.openPrefix, replacementRange: range)
-            return false
+
+            if carryListIfTyped(tv, range: range) {
+                return false
+            }
+            return true
+        }
+
+        /// An opening bracket arrives together with its closing half, the caret
+        /// left between the two — `(` becomes `()` with the cursor inside. Skipped
+        /// when a selection is being replaced rather than a pair opened, and where
+        /// the pair would corrupt Markdown image syntax. Returns true when it
+        /// handled the keystroke.
+        private func pairBracketIfTyped(_ tv: NSTextView, range: NSRange,
+                                        replacement: String?) -> Bool {
+            guard Settings.autoPairBrackets, range.length == 0,
+                  let typed = replacement, typed.count == 1,
+                  let close = Lists.closingBracket(for: Character(typed)) else { return false }
+            let ns = tv.string as NSString
+            guard range.location <= ns.length else { return false }
+            let before = ns.substring(to: range.location)
+            guard !Lists.breaksImageSyntax(beforeCaret: before, typed: Character(typed)) else { return false }
+
+            tv.insertText(typed + String(close), replacementRange: range)
+            tv.setSelectedRange(NSRange(location: range.location + 1, length: 0))
+            return true
+        }
+
+        /// Return on a plain list line — a bullet or a numbered item — carries its
+        /// prefix onto the next line, splitting the text at the caret, numbers
+        /// counting up and the lines after a mid-list split renumbering to match.
+        /// Return on an emptied item ends the list instead: the marker comes off
+        /// and the line keeps its indent. A selection goes first, replaced by the
+        /// Return the way a plain newline would replace it. The whole thing lands
+        /// as one edit, so one ⌘Z takes it all back. Returns false when the line
+        /// opens as ordinary prose and Return should behave normally.
+        private func carryListIfTyped(_ tv: NSTextView, range: NSRange) -> Bool {
+            let fullText = tv.string as NSString
+            guard range.location <= fullText.length else { return false }
+            let whole = range.length > 0
+                ? fullText.replacingCharacters(in: range, with: "")
+                : tv.string
+            let ns = whole as NSString
+            let line = ns.lineRange(for: NSRange(location: range.location, length: 0))
+            guard let item = Lists.item(
+                ns.substring(with: line).trimmingCharacters(in: .newlines)) else { return false }
+            var lines = whole.components(separatedBy: "\n")
+            let li = min(whole.prefix(line.location).filter { $0 == "\n" }.count,
+                         lines.count - 1)
+            let destination: Int
+
+            if item.isBlank {
+                lines[li] = item.indent                       // list over; indent stays
+                destination = line.location + (item.indent as NSString).length
+            } else {
+                let body = item.body as NSString
+                let at = max(0, min(range.location - line.location - (item.prefix as NSString).length,
+                                    body.length))
+                lines[li] = item.prefix + body.substring(with: NSRange(location: 0, length: at))
+                lines.insert(item.nextPrefix + body.substring(from: at), at: li + 1)
+                lines = Lists.renumbered(lines, around: li + 1)
+                // The caret waits at the end of the new line's prefix, which the
+                // renumbering may have rewritten.
+                let newPrefix = Lists.item(lines[li + 1])?.prefix ?? item.nextPrefix
+                destination = line.location + (lines[li] as NSString).length + 1
+                    + (newPrefix as NSString).length
+            }
+
+            let joined = lines.joined(separator: "\n")
+            guard joined != whole else { return false }
+            let full = NSRange(location: 0, length: ns.length)
+            applyingRewrite = true
+            defer { applyingRewrite = false }
+            if tv.shouldChangeText(in: full, replacementString: joined) {
+                tv.textStorage?.replaceCharacters(in: full, with: joined)
+                tv.didChangeText()
+                let caretRange = NSRange(location: min(destination, (joined as NSString).length),
+                                         length: 0)
+                tv.setSelectedRange(caretRange)
+                tv.scrollRangeToVisible(caretRange)
+            }
+            return true
         }
     }
 }
@@ -272,24 +431,36 @@ struct NoteEditorView: View {
     let note: Note
     @ObservedObject var deck: DeckModel
     unowned let controller: DeckController
-    var onRight: Bool = true
+    var edge: DeckEdge = .bottom
 
     @State private var text = ""
     @State private var saveWork: DispatchWorkItem?
     @State private var savedAt: Date?
     @FocusState private var findFocused: Bool
+    @FocusState private var titleFocused: Bool
 
     private var pal: NoteColor { note.palette }
+    private var onRight: Bool { edge == .right }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if onRight { gutter; sheet } else { sheet; gutter }
+        Group {
+            if edge.isBottom {
+                // The sheet runs to the screen edge; its own tab trails along as
+                // a strip at the far end, the way it does on a side dock.
+                VStack(spacing: 0) { gutter; sheet }
+            } else if onRight {
+                HStack(spacing: 0) { gutter; sheet }
+            } else {
+                HStack(spacing: 0) { sheet; gutter }
+            }
         }
         .background(
             noteShape
                 .fill(LinearGradient(colors: [pal.paper, pal.paper.opacity(0.88)],
                                      startPoint: .top, endPoint: .bottom))
-                .shadow(color: .black.opacity(0.34), radius: 28, x: onRight ? -12 : 12, y: 12)
+                .shadow(color: .black.opacity(0.34), radius: 28,
+                        x: edge == .right ? -12 : (edge == .left ? 12 : 0),
+                        y: edge.isBottom ? -12 : 12)
         )
         .clipShape(noteShape)
         .overlay(noteShape.strokeBorder(Color.black.opacity(0.07), lineWidth: 0.5))
@@ -298,6 +469,13 @@ struct NoteEditorView: View {
             savedAt = note.modified
         }
         .onChange(of: text) { _, v in scheduleSave(v) }
+        .onChange(of: note.body) { old, incoming in
+            if text == old {
+                saveWork?.cancel()
+                text = incoming
+                savedAt = note.modified
+            }
+        }
         .onChange(of: deck.findQuery) { _, q in
             if q != nil { findFocused = true } else { deck.bridge.focusText() }
         }
@@ -305,7 +483,7 @@ struct NoteEditorView: View {
     }
 
     /// Rounded where it leaves the deck, square where it meets the screen edge.
-    private var noteShape: UnevenRoundedRectangle { edgeTabShape(onRight: onRight, radius: 14) }
+    private var noteShape: UnevenRoundedRectangle { edgeTabShape(edge: edge, radius: 14) }
 
     // MARK: The note itself
 
@@ -314,8 +492,26 @@ struct NoteEditorView: View {
             header
             if deck.findQuery != nil { findBar }
             NoteTextView(text: $text, ink: NSColor(pal.ink),
-                         bridge: deck.bridge, autofocus: true,
+                         bridge: deck.bridge, autofocus: deck.renamingID == nil,
                          fontSize: deck.fontSize)
+            if !Photos.names(in: text).isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(Photos.names(in: text), id: \.self) { name in
+                            Button { NSWorkspace.shared.open(Paths.support.appendingPathComponent(name)) } label: {
+                                if let image = Photos.thumbnail(name) {
+                                    Image(nsImage: image).resizable().scaledToFit().frame(width: 100, height: 76)
+                                } else {
+                                    Label("Missing photo", systemImage: "photo").frame(width: 100, height: 76)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open photo. Delete its link from the note to remove the attachment.")
+                            .accessibilityLabel("Open attached photo")
+                        }
+                    }.padding(.horizontal, 14)
+                }.frame(height: 84)
+            }
             footer
         }
     }
@@ -326,34 +522,73 @@ struct NoteEditorView: View {
     /// still *measures* at its unrotated width, so the tint has to be sized on its
     /// own and the label clipped into it, or the background bleeds across the note.
     private var gutter: some View {
-        Rectangle()
-            .fill(pal.dash.opacity(0.20))
-            .frame(width: DeckGeom.gutterWidth)
-            .overlay {
-                Text(note.displayTitle.uppercased())
-                    .font(Ink.tabFont)
-                    .tracking(Ink.tabTracking)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(pal.ink.opacity(0.7))
-                    .frame(width: DeckGeom.editorHeight - 44)
-                    .rotationEffect(.degrees(onRight ? 90 : -90))
+        Group {
+            if edge.isBottom {
+                Rectangle()
+                    .fill(pal.dash.opacity(0.20))
+                    .frame(height: DeckGeom.gutterWidth)
+                    .overlay {
+                        Text(note.displayTitle)
+                            .font(Ink.tabFont)
+                            .tracking(Ink.tabTracking)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(pal.ink.opacity(0.7))
+                            .frame(width: DeckGeom.editorWidth - 44)
+                    }
+                    .clipped()
+                    .overlay(alignment: .bottom) {
+                        EdgeLine(horizontal: true)
+                            .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                            .foregroundStyle(pal.ink.opacity(0.22))
+                            .frame(height: 1)
+                    }
+            } else {
+                Rectangle()
+                    .fill(pal.dash.opacity(0.20))
+                    .frame(width: DeckGeom.gutterWidth)
+                    .overlay {
+                        Text(note.displayTitle)
+                            .font(Ink.tabFont)
+                            .tracking(Ink.tabTracking)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(pal.ink.opacity(0.7))
+                            .frame(width: DeckGeom.editorHeight - 44)
+                            .rotationEffect(.degrees(onRight ? 90 : -90))
+                    }
+                    .clipped()
+                    .overlay(alignment: onRight ? .trailing : .leading) {
+                        EdgeLine()
+                            .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                            .foregroundStyle(pal.ink.opacity(0.22))
+                            .frame(width: 1)
+                    }
             }
-            .clipped()
-            .overlay(alignment: onRight ? .trailing : .leading) {
-                EdgeLine()
-                    .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
-                    .foregroundStyle(pal.ink.opacity(0.22))
-                    .frame(width: 1)
-            }
+        }
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text(note.displayTitle)
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(pal.ink.opacity(0.92))
-                .lineLimit(1)
+            if deck.renamingID == note.id {
+                TextField("New note", text: $deck.renameDraft)
+                    .textFieldStyle(.plain)
+                    .font(Ink.titleFont)
+                    .foregroundStyle(pal.ink)
+                    .focused($titleFocused)
+                    .onSubmit { controller.commitRename() }
+                    .onAppear { titleFocused = true }
+                    .onChange(of: titleFocused) { _, on in
+                        if !on { controller.commitRename() }
+                    }
+            } else {
+                Text(note.displayTitle)
+                    .font(Ink.titleFont)
+                    .foregroundStyle(pal.ink.opacity(0.92))
+                    .lineLimit(1)
+                    .onTapGesture(count: 2) { controller.beginRename(note.id) }
+                    .help("Double-click to rename")
+            }
             Spacer(minLength: 6)
             Text(savedAt.map { "Saved · \(Fmt.ago($0))" } ?? "Not saved")
                 .font(.system(size: 10))
@@ -368,6 +603,16 @@ struct NoteEditorView: View {
             .buttonStyle(.plain)
             .foregroundStyle(pal.ink.opacity(note.pinned ? 0.85 : 0.4))
             .help(note.pinned ? "Unpin — ⌘P" : "Pin so it stays open  ⌘P")
+
+            Button { (deck.bridge.textView as? TaskTextView)?.choosePhotos() } label: {
+                Image(systemName: "photo.badge.plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(pal.ink.opacity(0.5))
+            .help("Add photos")
+            .accessibilityLabel("Add photos")
 
             Button { deck.bridge.toggleTaskLine() } label: {
                 Image(systemName: "checklist")
@@ -471,9 +716,11 @@ struct NoteEditorView: View {
     // MARK: Autosave — 250 ms after typing stops
 
     private func scheduleSave(_ value: String) {
+        TaskSync.shared.beginDraft(noteID: note.id)
         saveWork?.cancel()
         let work = DispatchWorkItem {
             NoteStore.shared.updateBody(id: note.id, body: value)
+            TaskSync.shared.endDraft(noteID: note.id)
             savedAt = Date()
         }
         saveWork = work
@@ -483,5 +730,6 @@ struct NoteEditorView: View {
     private func flush() {
         saveWork?.cancel()
         NoteStore.shared.updateBody(id: note.id, body: text)
+        TaskSync.shared.endDraft(noteID: note.id)
     }
 }

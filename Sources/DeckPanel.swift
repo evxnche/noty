@@ -16,48 +16,67 @@ enum DeckStyle: String, CaseIterable {
     }
 }
 
-/// Resolved metrics for one fan.
-///
-/// Tabs *shingle*: each is full height but sits `pitch` below the one before, so
-/// it laps over it like a roof tile. That keeps every tab tall enough to carry a
-/// label while the deck as a whole stays well short of the screen.
-struct DeckLayout {
-    var itemHeight: CGFloat     // full height of one tab
-    var pitch: CGFloat          // top-to-top spacing; < itemHeight means overlap
-    var moreGap: CGFloat
-    var moreHeight: CGFloat
-    var count: Int
-    var hasMore: Bool
-    var panelHeight: CGFloat
+/// Which screen edge the deck is docked to. Side docks stack their tabs down
+/// the edge with the labels turned on their side; the bottom dock runs them
+/// across the screen, labels reading flat.
+enum DeckEdge: String, CaseIterable {
+    case right, left, bottom
 
-    /// Negative for shingled tabs — VStack spacing that produces the overlap.
-    var spacing: CGFloat { pitch - itemHeight }
-
-    var stackHeight: CGFloat {
-        guard count > 0 else { return 0 }
-        return CGFloat(count - 1) * pitch + itemHeight
-            + (hasMore ? moreGap + moreHeight : 0)
-            + DeckGeom.plusGap + DeckGeom.plusSize
+    var title: String {
+        switch self {
+        case .right: return "Right edge"
+        case .left: return "Left edge"
+        case .bottom: return "Bottom edge"
+        }
     }
 
-    var top: CGFloat { max(12, (panelHeight - stackHeight) / 2) }
+    var isBottom: Bool { self == .bottom }
+}
+
+/// Resolved metrics for one fan. "Long" runs along the docked edge — down it
+/// for a side dock, across it for the bottom — and a tab's other dimension is
+/// its depth from the edge.
+///
+/// Tabs *shingle*: each is full length but sits `pitch` along from the one
+/// before, so it laps over it like a roof tile. That keeps every tab long
+/// enough to carry a label while the deck as a whole stays well short of the
+/// screen.
+struct DeckLayout {
+    var itemLong: CGFloat     // full length of one tab, along the edge
+    var pitch: CGFloat        // start-to-start spacing; < itemLong means overlap
+    var moreGap: CGFloat
+    var moreLong: CGFloat
+    var count: Int
+    var hasMore: Bool
+    var panelLong: CGFloat    // panel extent along the edge
+
+    /// Negative for shingled tabs — stack spacing that produces the overlap.
+    var spacing: CGFloat { pitch - itemLong }
+
+    var stackLong: CGFloat {
+        guard count > 0 else { return 0 }
+        return CGFloat(count - 1) * pitch + itemLong
+            + (hasMore ? moreGap + moreLong : 0)
+    }
+
+    var start: CGFloat { max(12, (panelLong - stackLong) / 2) }
 
     /// Centre of the strip of item `index` that is actually visible.
     func center(_ index: Int) -> CGFloat {
-        let strip = index == count - 1 ? itemHeight : pitch
-        return top + CGFloat(index) * pitch + strip / 2
+        let strip = index == count - 1 ? itemLong : pitch
+        return start + CGFloat(index) * pitch + strip / 2
     }
 
-    var cap: CGFloat { max(140, panelHeight - 76) }
-    var overflows: Bool { stackHeight > cap }
+    var cap: CGFloat { max(140, panelLong - 76) }
+    var overflows: Bool { stackLong > cap }
 }
 
 enum DeckGeom {
-    // Rest — a 12 pt pill of colour dashes
+    // Rest — a 12 pt pill of grey dashes
     static let pillWidth: CGFloat = 12
     static let pillTouchWidth: CGFloat = 14
-    static let dashHeight: CGFloat = 14
-    static let dashWidth: CGFloat = 7
+    static let dashHeight: CGFloat = 14       // dash length, along the edge
+    static let dashWidth: CGFloat = 7         // dash depth, out from the edge
     static let dashGap: CGFloat = 5
     static let pillPad: CGFloat = 7
     static let maxDashes = 14
@@ -83,29 +102,29 @@ enum DeckGeom {
     /// Everything leans the same way — a deck of tabs at matching angles reads as
     /// deliberate, where per-note angles just look scattered.
     static let leanDegrees: Double = 3.0
-    static func lean(onRight: Bool) -> Double { onRight ? -leanDegrees : leanDegrees }
+    static func lean(for edge: DeckEdge) -> Double {
+        edge == .left ? leanDegrees : -leanDegrees
+    }
 
     /// Rendered width of a tab label, used to size the strip that shows it.
     /// Must use the same face the tab draws with or the strip will not fit.
     static func labelWidth(_ title: String) -> CGFloat {
-        let text = title.uppercased() as NSString
+        let text = title as NSString
         guard text.length > 0 else { return 0 }
         return text.size(withAttributes: [.font: Ink.tabNSFont]).width
             + Ink.tabTracking * CGFloat(text.length)
     }
-    static let chipWidth: CGFloat = 30
-    static let chipHeight: CGFloat = 24
+    static let chipWidth: CGFloat = 30        // chip depth, out from the edge
+    static let chipHeight: CGFloat = 24       // chip length, along the edge
     static let chipGap: CGFloat = 6
-    static let fanWidth: CGFloat = 50
-    static let plusSize: CGFloat = 28
-    static let plusInset: CGFloat = 14
-    static let plusGap: CGFloat = 12
+    /// How far the fan reaches out from the docked edge.
+    static let fanDepth: CGFloat = 50
     static let moreTabHeight: CGFloat = 34
 
-    /// The deck may claim at most this much of the screen before tabs start shrinking.
-    static let heightBudget: CGFloat = 0.68
+    /// The deck may claim at most this much of the edge before tabs start shrinking.
+    static let longBudget: CGFloat = 0.68
 
-    /// The open note carries its own tab as a left gutter, so it reads as
+    /// The open note carries its own tab as a gutter, so it reads as
     /// growing out of the deck rather than floating beside it.
     static let gutterWidth: CGFloat = 30
 
@@ -114,23 +133,27 @@ enum DeckGeom {
     static let editorHeight: CGFloat = 380
     /// The open note runs to the screen edge and covers its own tab, exactly as a
     /// pulled sticky would — so there is no gap between note and deck to tune.
-    /// A little wider than the note so the lean has somewhere to go.
-    static var expandedWidth: CGFloat { max(fanWidth, editorWidth) + 22 }
+    /// A little deeper than the note so the lean has somewhere to go.
+    static func expandedDepth(for edge: DeckEdge) -> CGFloat {
+        let noteDepth = edge.isBottom ? editorHeight : editorWidth
+        return max(fanDepth, noteDepth) + 22
+    }
 
-    static func pillHeight(noteCount: Int) -> CGFloat {
+    /// The pill's length along the docked edge — one grey dash per note.
+    static func pillLength(noteCount: Int) -> CGFloat {
         let shown = min(noteCount, maxDashes)
         let n = max(1, shown + (noteCount > maxDashes ? 1 : 0))
         return pillPad * 2 + CGFloat(n) * dashHeight + CGFloat(n - 1) * dashGap
     }
 
-    static func layout(panelHeight: CGFloat, count: Int, hasMore: Bool,
+    static func layout(panelLong: CGFloat, count: Int, hasMore: Bool,
                        style: DeckStyle, longestLabel: CGFloat = 0) -> DeckLayout {
         let n = max(1, count)
         switch style {
         case .compact:
-            return DeckLayout(itemHeight: chipHeight, pitch: chipHeight + chipGap,
-                              moreGap: chipGap, moreHeight: 22,
-                              count: n, hasMore: hasMore, panelHeight: panelHeight)
+            return DeckLayout(itemLong: chipHeight, pitch: chipHeight + chipGap,
+                              moreGap: chipGap, moreLong: 22,
+                              count: n, hasMore: hasMore, panelLong: panelLong)
         case .tabs:
             // The uncovered strip of each tab is sized to the longest label on the
             // deck, so titles read in full until they hit the cap and ellipsise.
@@ -138,13 +161,13 @@ enum DeckGeom {
 
             // Guard rail: on a short display, shrink rather than run off-screen.
             let reserved = hasMore ? moreTabHeight + tabGap : 0
-            let budget = panelHeight * heightBudget - reserved
+            let budget = panelLong * longBudget - reserved
             if CGFloat(n) * pitch + tabLap > budget {
                 pitch = max(36, (budget - tabLap) / CGFloat(n))
             }
-            return DeckLayout(itemHeight: pitch + tabLap, pitch: pitch,
-                              moreGap: tabGap, moreHeight: moreTabHeight,
-                              count: n, hasMore: hasMore, panelHeight: panelHeight)
+            return DeckLayout(itemLong: pitch + tabLap, pitch: pitch,
+                              moreGap: tabGap, moreLong: moreTabHeight,
+                              count: n, hasMore: hasMore, panelLong: panelLong)
         }
     }
 }

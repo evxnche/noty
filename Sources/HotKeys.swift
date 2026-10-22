@@ -14,12 +14,10 @@ final class HotKeys {
     private init() {}
 
     func register(newNote: @escaping () -> Void,
-                  allNotes: @escaping () -> Void,
-                  archive: @escaping () -> Void) {
+                  showDeck: @escaping () -> Void) {
         installHandler()
         add(id: 1, key: UInt32(kVK_ANSI_N), mods: UInt32(optionKey | cmdKey), action: newNote)
-        add(id: 2, key: UInt32(kVK_ANSI_A), mods: UInt32(optionKey | cmdKey), action: allNotes)
-        add(id: 3, key: UInt32(kVK_ANSI_L), mods: UInt32(optionKey | cmdKey), action: archive)
+        add(id: 2, key: UInt32(kVK_ANSI_A), mods: UInt32(optionKey | cmdKey), action: showDeck)
     }
 
     private func installHandler() {

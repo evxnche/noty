@@ -20,13 +20,22 @@ enum DeckState: Equatable {
         if case .expanded(let id) = self { return id }
         return nil
     }
+
+    /// The rest pill's length depends on note count. Fan and expanded already
+    /// fill the edge, so a `$notes` emission must not relayout those — doing so
+    /// shrinks the panel back to 12 pt and eats ⌥⌘N's expand.
+    var resizesWithNoteCount: Bool { self == .rest }
 }
 
 final class DeckModel: ObservableObject {
     @Published var state: DeckState = .rest
     @Published var showAll = false          // "+N more" opened into a scrolling list
     @Published var findQuery: String?       // nil = find bar hidden
+    @Published var renamingID: String?      // inline title edit
+    @Published var renameDraft = ""
     @Published var revealTick = 0           // bumped to restage the fan animation
+    /// The tab the keyboard is on while the deck is fanned by ⌥⌘A.
+    @Published var keyboardFocusID: String?
 
     /// Owns the NSTextView of the open note so ⌘F can drive it.
     let bridge = EditorBridge()
@@ -36,17 +45,17 @@ final class DeckModel: ObservableObject {
 
     // Mirrored from Settings so SwiftUI re-renders when a preference flips.
     @Published var style: DeckStyle = Settings.deckStyle
-    @Published var onLeftEdge: Bool = Settings.deckOnLeftEdge
+    @Published var edge: DeckEdge = Settings.deckEdge
     @Published var fontSize: Double = Settings.noteFontSize
     /// Published by the controller the instant the panel is resized. Reading this
     /// instead of a GeometryReader matters: the reader reports the *previous* size
     /// for a frame or two after a resize, and the deck lays out against the wrong
     /// edge in the meantime.
-    @Published var panelHeight: CGFloat = 0
+    @Published var panelSize: CGSize = .zero
 
     func syncPreferences() {
         style = Settings.deckStyle
-        onLeftEdge = Settings.deckOnLeftEdge
+        edge = Settings.deckEdge
         fontSize = Settings.noteFontSize
     }
 }
@@ -64,11 +73,21 @@ final class DeckController: NSObject {
     private var container: DeckContentView!
     private var keyMonitor: Any?
     private var outsideMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
     private var idleTimer: Timer?
     private var lastActivity = Date()
     private var lastPointer = NSEvent.mouseLocation
     private var exitWork: DispatchWorkItem?     // debounced pointer-exit check
     private var shrinkWork: DispatchWorkItem?   // delayed panel shrink after collapse
+    /// True while the deck was fanned from the keyboard (⌥⌘A) rather than the
+    /// pointer — the pointer is somewhere else, so the usual leave-the-hot-zone
+    /// collapse must stand down until the mouse takes over.
+    private var keyboardDriven = false
+    /// What the panel is actually sized for. SwiftUI `model.state` lags two frames
+    /// on rest→expanded so the open animation does not drag the deck; `$notes`
+    /// still has to see this, not the lagged published state, or it will shrink
+    /// the panel back to the pill mid-expand (⌥⌘N).
+    private var sizedFor: DeckState = .rest
     private var bag = Set<AnyCancellable>()
 
     weak var manager: DeckManager?
@@ -100,7 +119,7 @@ final class DeckController: NSObject {
         NoteStore.shared.$notes
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                guard let self, self.model.state == .rest else { return }
+                guard let self, self.sizedFor.resizesWithNoteCount else { return }
                 self.layout()
             }
             .store(in: &bag)
@@ -109,38 +128,62 @@ final class DeckController: NSObject {
     deinit {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
         idleTimer?.invalidate()
         panel.orderOut(nil)
     }
 
     // MARK: Layout
 
-    func layout() { layout(for: model.state) }
+    func layout() { layout(for: sizedFor) }
 
     func layout(for state: DeckState) {
+        sizedFor = state
         guard let screen else { return }
         let full = screen.frame
         let vis = screen.visibleFrame
-        let onRight = !Settings.deckOnLeftEdge
+        let edge = Settings.deckEdge
 
         let frame: NSRect
         switch state {
         case .rest:
-            let h = DeckGeom.pillHeight(noteCount: max(1, NoteStore.shared.active.count))
-            let w = DeckGeom.pillTouchWidth
-            frame = NSRect(x: onRight ? full.maxX - w : full.minX,
-                           y: vis.midY - h / 2, width: w, height: h)
+            // The pill: a thin strip on the docked edge, centred along it.
+            let len = DeckGeom.pillLength(noteCount: max(1, NoteStore.shared.active.count))
+            let thick = DeckGeom.pillTouchWidth
+            switch edge {
+            case .right:
+                frame = NSRect(x: full.maxX - thick, y: vis.midY - len / 2,
+                               width: thick, height: len)
+            case .left:
+                frame = NSRect(x: full.minX, y: vis.midY - len / 2,
+                               width: thick, height: len)
+            case .bottom:
+                // Above a visible Dock — which lives at this edge on a default
+                // setup and would otherwise sit on top of the pill — and flush
+                // to the true edge whenever the Dock is hidden or absent.
+                frame = NSRect(x: full.midX - len / 2, y: vis.minY,
+                               width: len, height: thick)
+            }
         case .fan, .expanded:
-            // Same width for both. Resizing the panel as a note opens makes the
+            // Same size for both. Resizing the panel as a note opens makes the
             // window resize and SwiftUI's relayout land in different frames, and
             // for one frame the deck draws against the panel's far edge — which
             // looks exactly like the note flying in from mid-screen.
-            let w = DeckGeom.expandedWidth
-            frame = NSRect(x: onRight ? full.maxX - w : full.minX,
-                           y: vis.minY, width: w, height: vis.height)
+            let depth = DeckGeom.expandedDepth(for: edge)
+            switch edge {
+            case .right:
+                frame = NSRect(x: full.maxX - depth, y: vis.minY,
+                               width: depth, height: vis.height)
+            case .left:
+                frame = NSRect(x: full.minX, y: vis.minY,
+                               width: depth, height: vis.height)
+            case .bottom:
+                frame = NSRect(x: full.minX, y: vis.minY,
+                               width: full.width, height: depth)
+            }
         }
         panel.setFrame(frame, display: true, animate: false)
-        if model.panelHeight != frame.height { model.panelHeight = frame.height }
+        if model.panelSize != frame.size { model.panelSize = frame.size }
     }
 
     func refreshLevel() {
@@ -179,7 +222,7 @@ final class DeckController: NSObject {
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 DeckLog.line("shrink fires; state=\(self.model.state)")
-                self.layout()
+                self.layout(for: self.model.state)
             }
             shrinkWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.30, execute: work)
@@ -188,11 +231,21 @@ final class DeckController: NSObject {
         noteActivity()
         if new.expandedID != nil {
             installKeyMonitor(); installOutsideMonitor()
+        } else if new == .fan {
+            installKeyMonitor()          // the keyboard fan listens for Tab / ↩
         } else {
             removeKeyMonitor(); removeOutsideMonitor()
         }
         if new == .rest { stopIdleWatch() } else { startIdleWatch() }
-        if new == .rest { model.showAll = false; model.findQuery = nil }
+        if new == .rest {
+            // A keyboard fan holds the app active; hand focus back as it tidies away.
+            if keyboardDriven { NSApp.deactivate() }
+            keyboardDriven = false
+            model.keyboardFocusID = nil
+            commitRename()
+            model.showAll = false
+            model.findQuery = nil
+        }
     }
 
     /// Anything the user does keeps the deck awake.
@@ -210,7 +263,8 @@ final class DeckController: NSObject {
             let now = NSEvent.mouseLocation
             // The panel is wider than the deck, so the tracking area cannot tell us
             // the pointer has left the tabs; compare against the strip instead.
-            if self.model.state == .fan, !self.hotZone.contains(now) {
+            if self.model.state == .fan, !self.keyboardDriven,
+               !self.hotZone.contains(now) {
                 self.collapse(); return
             }
             if abs(now.x - self.lastPointer.x) > 2 || abs(now.y - self.lastPointer.y) > 2 {
@@ -219,12 +273,13 @@ final class DeckController: NSObject {
             }
             let idle = Date().timeIntervalSince(self.lastActivity)
             switch self.model.state {
-            case .fan where idle > Settings.fanIdleTimeout:
-                self.collapse()
             case .expanded where idle > Settings.noteIdleTimeout && !self.openNoteIsPinned:
                 self.dismiss()
             default: break
             }
+            // The keyboard fan has no pointer to leave, so it does not age out —
+            // it stays until Esc / ↩ / the pointer takes over, or another app
+            // goes active (watching didResignActive below).
         }
     }
 
@@ -238,20 +293,33 @@ final class DeckController: NSObject {
         exitWork?.cancel(); exitWork = nil
         shrinkWork?.cancel(); shrinkWork = nil
         DeckLog.line("pointerEntered state=\(model.state) panel=\(Int(panel.frame.width))")
-        guard model.state == .rest else { layout(); return }
+        guard model.state == .rest else {
+            // Hand over to the mouse only when it is really on the deck. The
+            // panel is far bigger than the fan, and a ⌥⌘A fan opens under a
+            // pointer parked mid-screen — cancelling keyboard mode there just
+            // lets the watchdog tear the fan straight back down.
+            if hotZone.contains(NSEvent.mouseLocation) { endKeyboardFan() }
+            layout()
+            return
+        }
         manager?.deckDidActivate(self)
         setState(.fan)
     }
 
-    /// The panel is wide enough to hold an open note, but the deck itself only
+    /// The panel is deep enough to hold an open note, but the deck itself only
     /// occupies the strip against the screen edge — that strip is what "leaving
     /// the deck" means.
     private var hotZone: NSRect {
         let f = panel.frame
-        let w = DeckGeom.fanWidth + 20
-        return Settings.deckOnLeftEdge
-            ? NSRect(x: f.minX, y: f.minY, width: w, height: f.height)
-            : NSRect(x: f.maxX - w, y: f.minY, width: w, height: f.height)
+        let d = DeckGeom.fanDepth + 20
+        switch Settings.deckEdge {
+        case .right:
+            return NSRect(x: f.maxX - d, y: f.minY, width: d, height: f.height)
+        case .left:
+            return NSRect(x: f.minX, y: f.minY, width: d, height: f.height)
+        case .bottom:
+            return NSRect(x: f.minX, y: f.minY, width: f.width, height: d)
+        }
     }
 
     func pointerExited() {
@@ -273,16 +341,117 @@ final class DeckController: NSObject {
         noteActivity()
         manager?.deckDidActivate(self)
         setState(.expanded(id))
-        NSApp.activate()
+        claimKeyAndFocus()
+    }
+
+    // MARK: Keyboard fan (⌥⌘A)
+
+    /// The tabs the keyboard is cycling over — mirrors `visible` in DeckRootView.
+    private var keyboardVisibleIDs: [String] {
+        (model.showAll
+            ? NoteStore.shared.active
+            : Array(NoteStore.shared.active.prefix(Settings.fanLimit))).map(\.id)
+    }
+
+    /// ⌥⌘A: fan the deck without the pointer, ready for Tab / ↩.
+    func showDeck() {
+        manager?.deckDidActivate(self)
+        keyboardDriven = true
+        model.keyboardFocusID = keyboardVisibleIDs.first
+        setState(.fan)
+        installResignWatch()
+        // Tab has to reach the deck, so the panel must be key — the fan wakes
+        // holding focus, unlike the pointer fan, which never takes it.
+        stealFocus()
+    }
+
+    /// A keyboard fan outlives the idle watch on purpose; the user moving on to
+    /// another app is what ends it.
+    private func installResignWatch() {
+        guard resignObserver == nil else { return }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.keyboardDriven, self.model.state == .fan else { return }
+            self.collapseToRest()
+        }
+    }
+
+    /// The pointer took over from the keyboard.
+    func endKeyboardFan() {
+        guard keyboardDriven else { return }
+        keyboardDriven = false
+        model.keyboardFocusID = nil
+    }
+
+    private func cycleKeyboardSelection(backwards: Bool) {
+        noteActivity()
+        var ids = keyboardVisibleIDs
+        guard !ids.isEmpty else { return }
+        // Tabbing past the last shown tab pulls the rest out behind it (+N).
+        if !backwards, !model.showAll,
+           ids.count < NoteStore.shared.active.count,
+           model.keyboardFocusID == ids.last {
+            model.showAll = true
+            ids = NoteStore.shared.active.map(\.id)
+        }
+        let current = model.keyboardFocusID.flatMap { ids.firstIndex(of: $0) } ?? -1
+        model.keyboardFocusID = ids[(current + (backwards ? -1 : 1) + ids.count) % ids.count]
+    }
+
+    func beginRename(_ id: String) {
+        expand(id)
+        model.renameDraft = NoteStore.shared.note(id: id)?.title ?? ""
+        model.renamingID = id
+        noteActivity()
+    }
+
+    func commitRename() {
+        guard let id = model.renamingID else { return }
+        NoteStore.shared.setTitle(id: id, title: model.renameDraft)
+        model.renamingID = nil
+        model.bridge.focusText()
+    }
+
+    func cancelRename() {
+        model.renamingID = nil
+        model.bridge.focusText()
+    }
+
+    /// Accessory + `.nonactivatingPanel` will show the note without taking keys.
+    /// Activation is async and the editor is created two frames later, so keep
+    /// asking until the text view can actually take typing.
+    private func claimKeyAndFocus() {
+        stealFocus()
+        for t in [0.0, 0.05, 0.12, 0.25] as [TimeInterval] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in
+                guard let self, self.model.state.expandedID != nil else { return }
+                self.stealFocus()
+                if self.model.renamingID == nil { self.model.bridge.focusText() }
+            }
+        }
+    }
+
+    private func stealFocus() {
+        let me = NSRunningApplication.current
+        if let front = NSWorkspace.shared.frontmostApplication,
+           front.bundleIdentifier != me.bundleIdentifier {
+            _ = me.activate(from: front)
+        } else {
+            NSApp.activate()
+        }
         panel.makeKeyAndOrderFront(nil)
     }
 
     /// Closing a note steps back to the deck — the tabs stay where they were.
     /// Only leaving the deck entirely puts it back to sleep.
     func collapse() {
+        commitRename()
         if model.state.expandedID != nil {
             setState(.fan)
-            NSApp.deactivate()
+            // Esc out of a keyboard-opened note steps back to the deck, which
+            // stays on the keyboard — only the pointer flow hands focus back.
+            if !keyboardDriven { NSApp.deactivate() }
             // If the pointer is already away from the edge, the deck follows it
             // shut on the next poll rather than hanging around.
         } else {
@@ -299,6 +468,7 @@ final class DeckController: NSObject {
 
     /// Dismiss the whole deck, note and tabs together.
     func dismiss() {
+        commitRename()
         let wasExpanded = model.state.expandedID != nil
         setState(.rest)
         if wasExpanded { NSApp.deactivate() }
@@ -311,13 +481,31 @@ final class DeckController: NSObject {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  let id = self.model.state.expandedID,
-                  self.panel.isKeyWindow else { return event }
+            guard let self, self.panel.isKeyWindow else { return event }
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+            // Keyboard-driven fan (⌥⌘A): Tab picks a tab, ↩ opens it, Esc tidies away.
+            if self.model.state == .fan {
+                guard self.model.keyboardFocusID != nil else { return event }
+                switch event.keyCode {
+                case 53:                                              // Esc
+                    self.setState(.rest)
+                    return nil
+                case 48:                                              // Tab
+                    self.cycleKeyboardSelection(backwards: mods.contains(.shift))
+                    return nil
+                case 36, 76:                                          // ↩ / keypad ⏎
+                    if let id = self.model.keyboardFocusID { self.expand(id) }
+                    return nil
+                default:
+                    return event
+                }
+            }
+            guard let id = self.model.state.expandedID else { return event }
+
             if event.keyCode == 53 {                                  // Esc
-                if self.model.findQuery != nil { self.model.findQuery = nil }
+                if self.model.renamingID != nil { self.cancelRename() }
+                else if self.model.findQuery != nil { self.model.findQuery = nil }
                 else { self.collapse() }
                 return nil
             }
@@ -387,14 +575,18 @@ final class DeckController: NSObject {
     func showContextMenu(at event: NSEvent) {
         let menu = NSMenu()
         menu.addItem(withTitle: "New Note", action: #selector(AppDelegate.newNote), keyEquivalent: "")
-        menu.addItem(withTitle: "All Notes", action: #selector(AppDelegate.openAllNotes), keyEquivalent: "")
-        menu.addItem(withTitle: "Archive", action: #selector(AppDelegate.openArchive), keyEquivalent: "")
+        menu.addItem(withTitle: "Task Sync…", action: #selector(AppDelegate.showSyncSettings), keyEquivalent: "")
         menu.addItem(.separator())
 
         let overFS = NSMenuItem(title: "Show over full-screen apps",
                                 action: #selector(AppDelegate.toggleOverFullScreen), keyEquivalent: "")
         overFS.state = Settings.showOverFullScreen ? .on : .off
         menu.addItem(overFS)
+
+        let autoPair = NSMenuItem(title: "Auto-pair brackets",
+                                  action: #selector(AppDelegate.toggleAutoPairBrackets), keyEquivalent: "")
+        autoPair.state = Settings.autoPairBrackets ? .on : .off
+        menu.addItem(autoPair)
 
         let styleItem = NSMenuItem(title: "Deck style", action: nil, keyEquivalent: "")
         let styleMenu = NSMenu()
@@ -431,10 +623,17 @@ final class DeckController: NSObject {
         textItem.submenu = textMenu
         menu.addItem(textItem)
 
-        let leftEdge = NSMenuItem(title: "Dock deck to left edge",
-                                  action: #selector(AppDelegate.toggleDeckEdge), keyEquivalent: "")
-        leftEdge.state = Settings.deckOnLeftEdge ? .on : .off
-        menu.addItem(leftEdge)
+        let edgeItem = NSMenuItem(title: "Deck edge", action: nil, keyEquivalent: "")
+        let edgeMenu = NSMenu()
+        for e in DeckEdge.allCases {
+            let it = NSMenuItem(title: e.title, action: #selector(AppDelegate.setDeckEdge(_:)),
+                                keyEquivalent: "")
+            it.representedObject = e.rawValue
+            it.state = Settings.deckEdge == e ? .on : .off
+            edgeMenu.addItem(it)
+        }
+        edgeItem.submenu = edgeMenu
+        menu.addItem(edgeItem)
 
         let updates = NSMenuItem(title: "Check for Updates…",
                                  action: #selector(AppDelegate.checkForUpdates), keyEquivalent: "")

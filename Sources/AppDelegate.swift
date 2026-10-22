@@ -10,16 +10,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         deckManager = DeckManager()
         UndoToast.shared.start()
+        TaskSync.shared.start()
 
         HotKeys.shared.register(
             newNote: { [weak self] in self?.newNote() },
-            allNotes: { [weak self] in self?.openAllNotes() },
-            archive:  { [weak self] in self?.openArchive() }
+            showDeck: { [weak self] in self?.deckManager.focused?.showDeck() }
         )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         HotKeys.shared.unregisterAll()
+        TaskSync.shared.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -31,12 +32,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         deckManager.focused?.expand(note.id)
     }
 
-    @objc func openAllNotes() { LibraryWindow.shared.show(mode: .all) }
-    @objc func openArchive() { LibraryWindow.shared.show(mode: .archive) }
-
     @objc func toggleOverFullScreen() {
         Settings.showOverFullScreen.toggle()
         deckManager.refreshAll()
+    }
+
+    @objc func toggleAutoPairBrackets() {
+        Settings.autoPairBrackets.toggle()
     }
 
     @objc func setDeckStyle(_ sender: NSMenuItem) {
@@ -67,8 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         deckManager.refreshAll()
     }
 
-    @objc func toggleDeckEdge() {
-        Settings.deckOnLeftEdge.toggle()
+    @objc func setDeckEdge(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let edge = DeckEdge(rawValue: raw) else { return }
+        Settings.deckEdge = edge
         deckManager.refreshAll()
     }
 
@@ -90,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func quit() { NSApp.terminate(nil) }
 
+    @objc func showSyncSettings() { TaskSyncWindow.shared.show() }
+
     @objc func showAbout() {
         NSApp.activate()
         let a = NSAlert()
@@ -97,12 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.informativeText = """
         Sticky notes docked to the edge of your screen.
 
-        ⌥⌘N  new note      ⌥⌘A  all notes      ⌥⌘L  archive
+        ⌥⌘N  new note      ⌥⌘A  show deck
+        Deck up — Tab picks a tab, ↩ opens it ready to type, Esc tidies away.
         In a note — Esc closes, ⌘F finds, ⌘. cycles colour, ⌘⌫ deletes.
 
         Notes are stored locally in an SQLite database; bodies are encrypted \
-        with AES-GCM. Your notes never leave this Mac — the only network request \
-        the app makes is the update check, which you can switch off.
+        with AES-GCM. Optional sync shares note text with your private site and \
+        Desk Pal. Photos remain local files on this Mac.
         """
         a.runModal()
     }
@@ -119,11 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Noty", action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Task Sync…", action: #selector(showSyncSettings), keyEquivalent: "")
         appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "New Note", action: #selector(newNote), keyEquivalent: "n")
-        appMenu.addItem(withTitle: "All Notes", action: #selector(openAllNotes), keyEquivalent: "a")
-        appMenu.addItem(withTitle: "Archive", action: #selector(openArchive), keyEquivalent: "l")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Import…", action: #selector(importStickies), keyEquivalent: "i")
         appMenu.addItem(.separator())
@@ -134,9 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Noty", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Noty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        // The three global shortcuts already carry ⌥; mirror that here so the menu
-        // items do not shadow ⌘N / ⌘A / ⌘L inside text fields.
-        for title in ["New Note", "All Notes", "Archive"] {
+        // The two remaining global shortcuts already carry ⌥; mirror that here so
+        // the menu item does not shadow ⌘N inside text fields. ⌥⌘A is handled by
+        // the Carbon hotkey alone (it fans the deck).
+        for title in ["New Note"] {
             appMenu.item(withTitle: title)?.keyEquivalentModifierMask = [.command, .option]
         }
         for item in appMenu.items where item.action != nil

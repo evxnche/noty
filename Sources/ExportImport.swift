@@ -29,9 +29,11 @@ struct StickyNote: Codable {
     }
 
     var note: Note {
-        Note(id: id, title: title.isEmpty ? Note.derivedTitle(from: body) : title,
-             body: body, color: color, created: created, modified: modified,
-             archived: archived, order: order)
+        let derived = Note.derivedTitle(from: body)
+        let t = title.isEmpty ? derived : title
+        return Note(id: id, title: t, body: body, color: color,
+                    created: created, modified: modified, archived: archived,
+                    titleCustom: !title.isEmpty && title != derived, order: order)
     }
 }
 

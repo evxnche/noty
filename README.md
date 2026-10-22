@@ -1,9 +1,9 @@
 # Noty
 
-Sticky notes that live at the edge of your screen. A native macOS app in Swift,
-SwiftUI and AppKit.
+Monochrome sticky notes that live at the bottom edge of your screen. A native
+macOS app in Swift, SwiftUI and AppKit.
 
-No dock icon, no window to manage. Slide the pointer to the right edge and the
+No dock icon, no window to manage. Slide the pointer to the bottom edge and the
 deck fans out.
 
 **[noty-sepia.vercel.app](https://noty-sepia.vercel.app)** ·
@@ -19,13 +19,12 @@ deck fans out.
 
 | State | What you see | Trigger |
 |---|---|---|
-| **Rest** | A 12 pt pill on the screen edge — one coloured dash per note | idle |
+| **Rest** | A 12 pt pill on the screen edge — one grey dash per note | idle |
 | **Fan** | Notes shingle down the edge 45 ms apart as vertical tabs, each keeping its colour and carrying its label turned on its side | pointer enters the pill |
 | **Expanded** | The note slides clear of the deck at full size, level with its own tab, which stays visible behind it | click a tab |
 
 The deck shows **five notes at a time** and puts the rest behind a `+N` tab, which
-opens the full list in a scrolling deck. A `+` button sits in the bottom corner
-while the deck is open.
+opens the full list in a scrolling deck.
 
 Tabs **shingle**: each one is full height but sits only a strip below the one
 before, lapping over it like a roof tile. That is what keeps the deck to roughly
@@ -42,7 +41,7 @@ Right-click the pill → **Deck style**:
 | | |
 |---|---|
 | **Labelled tabs** | Full-size tabs carrying their titles — the default |
-| **Colour chips** | Colour only, no labels; the deck shrinks to a row of chips |
+| **Grey chips** | Shade only, no labels; the deck shrinks to a row of chips |
 
 The open note carries its own tab along as a left gutter, separated by a dashed
 rule, so it reads as growing out of the deck rather than floating beside it.
@@ -55,8 +54,16 @@ permission is required**:
 | | |
 |---|---|
 | `⌥⌘N` | new note (opens it straight away) |
-| `⌥⌘A` | All Notes |
-| `⌥⌘L` | Archive |
+| `⌥⌘A` | show the deck (see below) |
+
+The deck, without the pointer — `⌥⌘A` fans the tabs out and puts the keyboard
+in charge:
+
+| | |
+|---|---|
+| `Tab` / `⇧Tab` | cycle the selection (a ring marks it); tabbing past the last shown tab pulls the `+N` rest out |
+| `↩` | open the picked note, caret in the body, ready to type |
+| `Esc` | tidy the deck away (or step back to the tabs from an open note) |
 
 Inside a note:
 
@@ -74,6 +81,18 @@ Standard editing (`⌘C` / `⌘V` / `⌘Z` / `⌘A`) works everywhere — the ap
 main menu at launch purely so those key equivalents dispatch, even though an
 accessory app draws no menu bar.
 
+## Photos
+
+Click **Add photos** in a note's header, or paste an image or copied image files
+with `⌘V`. Photos appear in a thumbnail strip; click a thumbnail to open it.
+Delete its `![Photo](photo-…)` link from the note to remove the preview.
+
+Original image files are copied beside `notes.db` in
+`~/Library/Application Support/Noty/`; pasted images are saved as PNG.
+These image files are unencrypted. Copies stay on disk after removing a link or
+note so undo remains safe. Exports currently include the links, not the image
+files; copy the photo files separately when moving notes to another Mac.
+
 ## Checkbox tasks
 
 Any line can be a task. `⌘T` (or the checklist button in a note's header) puts a
@@ -83,14 +102,12 @@ Return on an empty task ends the list.
 
 Tasks live inline in the note body as `☐` / `☑` prefixes, so a note stays plain
 text. Markdown export writes them as standard `- [ ]` / `- [x]` task syntax and
-import reads that back. All Notes shows a `done/total` count per note.
+import reads that back.
 
 ## Everything else
 
-- **Archived, not deleted.** Archiving pulls a note out of the deck but keeps it
-  in All Notes → Archive, restorable at any time.
-- **All Notes** (`⌥⌘A`) — one window, search across every note body and title,
-  with an editable detail pane.
+- **Archived, not deleted.** Archiving pulls a note out of the deck; it stays
+  in the database (and in exports) until deleted there.
 - **Multi-display** — each screen gets its own dormant pill on its right edge.
   The deck opens on whichever screen the pointer enters and the others stay shut.
   Displays are tracked by `CGDirectDisplayID`, so hot-plugging rebuilds the decks.
@@ -98,9 +115,19 @@ import reads that back. All Notes shows a `done/total` count per note.
   This raises the panel to `.statusBar` level; `.floating` alone does not draw
   over a full-screen space.
 - **Autosave** 250 ms after you stop typing, and again on close.
-- **Pick the face and the size.** Right-click the pill → *Note font* offers the
-  installed faces that suit a note (a hand by default), and *Text size* or
-  `⌃+` / `⌃-` sets the size. Tab labels follow the same face, a weight bolder.
+- **Monochrome by design.** Every note and both shade pickers use the same
+  eight-step grey palette.
+- **Structured mono type.** Note bodies default to bundled IBM Plex Mono. Type
+  `# ` through `###### ` at the start of a line to set a Departure Mono header.
+  *Text size* or `⌃+` / `⌃-` sets the size.
+- **Instant tasklists.** Type `list` on a line by itself to turn every non-empty
+  line into a checkbox task. Type `list` again to strip the checkboxes back off.
+- **Self-populating lists.** Return carries a bullet (`- `, `* `, `> `) or a
+  numbered item (`1. ` / `1/ `) onto the next line, numbers counting up and a
+  split mid-list renumbering the rest; Return on an emptied item ends the list.
+  Opening brackets pair themselves — `(` types `()`, `[` types `[]` — with the
+  caret left between (a toggle in the deck's right-click menu). Any of it comes
+  back with one `⌘Z`.
 - **Pin a note to keep it open.** The pin in a note's header (or `⌘P`) stops it
   being dismissed by anything you did not aim at it — clicking away in another
   app, or leaving it idle. Esc and Close still close it. Pinned tabs carry a dot,
@@ -114,20 +141,52 @@ import reads that back. All Notes shows a `done/total` count per note.
   a single document, or a `.stickies` archive that preserves colours, archived
   state and dates. **Import** reads `.stickies` back, and will also take loose
   `.md` / `.txt` files.
-- Right-click the pill for the full menu: new note, windows, edge side, launch at
-  login, export, import, quit.
+- Right-click the pill for the full menu: new note, windows, deck edge (bottom
+  by default), launch at login, export, import, quit.
 
-## Your notes stay on your Mac
+## Notes, phone sync and Desk Pal
+
+Right-click the Noty pill → **Task Sync…** to connect a private sync site and
+pair your phone with its QR code or private link. The phone page supports adding,
+editing, completing and deleting tasks, with local queues when it goes offline.
+The desktop polls every 15 seconds and pushes changes after autosave.
+
+Full note text syncs with the private service and can be edited from the phone's
+**Notes** view. Photos remain local files. Conflicting text edits keep both
+versions; deletion markers prevent stale clients from resurrecting removed notes.
+Sync is off until configured.
+
+The selected **Desk Pal** note alone supplies the board's Plan tasks and project
+pipeline. Use `# to-do`, `# idea`, `# building`, `# testing`, and `# shipped`
+(`shift` is also recognized). Existing tasks and projects stay intact during
+the additive migration. Other notes supply spoken context without appearing
+on the Plan screen. Say **“show my work note”** to open a named note on the board;
+questions about note content leave the current screen alone.
+
+The dependency-free server and mobile app live in `web/`. See
+[web/README.md](web/README.md) for local use, private cloud deployment, the wire
+contract and the ESP32 integration. The board caches full note text and projects
+the selected note, without discarding its older stored tasks or projects.
+
+## Local storage and privacy
 
 - Local SQLite database in `~/Library/Application Support/Noty/`.
 - **Note bodies are encrypted with AES-GCM** (CryptoKit, 256-bit). Titles,
   colours and timestamps stay in plaintext so lists render without unsealing
   every row.
-- No account, no server, no analytics, no telemetry, no tracking SDKs.
-- **One network request, ever:** Sparkle fetches the appcast to see whether a
+- No analytics, telemetry or tracking SDKs. Task sync is optional and uses your
+  private server key; it does not require a Noty account.
+- **With task sync disabled:** Sparkle fetches the appcast to see whether a
   newer version exists. Nothing about your notes is sent — it is a plain GET of
   a public XML file. Turn it off with *Check automatically* in the pill's menu,
-  and it never fires again.
+  and it never fires again. When sync is enabled, full note text and titles are
+  sent to your configured HTTPS service. The voice server reads that private
+  text as context when answering questions; quoted note content is reference
+  data, never permission to perform actions.
+- Sync settings and queued changes are encrypted with the same local AES key
+  and saved with owner-only permissions beside the notes database. Note records
+  on the sync server are protected by the private key; this is not end-to-end
+  encryption. Keep the phone pairing link private.
 - No Accessibility permission, no Screen Recording, no system permissions.
 
 Verify it yourself:
@@ -149,6 +208,14 @@ and macOS 15+.
 ./build.sh release run       # build, then relaunch
 open build/Noty.app
 ```
+
+If iCloud repeatedly adds Finder metadata during signing, build outside its
+File Provider directory: `NOTY_BUILD_DIR=/private/tmp/noty-build ./build.sh debug`.
+
+Run native logic checks with `./scripts/run-tests.sh`. With a disposable local
+sync server running, `./scripts/run-sync-integration.sh` verifies the real native
+network engine using isolated storage. `NOTY_SUPPORT_DIR` overrides the native
+data directory for such tests; leave it unset for normal use.
 
 `build.sh` drives `swiftc` directly over `Sources/*.swift`, assembles the
 `.app` bundle around `Info.plist`, embeds Sparkle, and signs it.
@@ -191,7 +258,7 @@ Sources/
   Core.swift            Paths, AES-GCM Crypto, colour palette, Note model
   Store.swift           SQLite (C API) — schema, load, upsert, delete
   NoteStore.swift       observable model; the single source of truth
-  Settings.swift        UserDefaults prefs + launch-at-login
+  Settings.swift        UserDefaults prefs + launch-at-login + deck edge
   HotKeys.swift         Carbon global shortcuts (no permissions)
   DeckPanel.swift       geometry, NSPanel subclass, tracking container
   DeckController.swift  one deck per display + the state machine
