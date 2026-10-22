@@ -83,8 +83,7 @@ NOTY_SYNC_TOKEN=<the same key from step 1>
 ```
 
 `NOTY_NOTES_URL` is the full `/api/notes` address. Without it, desk-voice
-falls back to its built-in default URL, which is someone else's server, so
-always set it.
+turns notes off and says they aren't configured.
 
 ## Local verification
 
