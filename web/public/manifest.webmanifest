@@ -1,0 +1,11 @@
+{
+  "id": "/",
+  "name": "Noty — shared notes",
+  "short_name": "Noty",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#e9e9e6",
+  "theme_color": "#e9e9e6",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

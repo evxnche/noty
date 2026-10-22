@@ -1,0 +1,12 @@
+{
+  "name": "noty-task-sync",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs mobile-test/*.test.mjs",
+    "check": "node --check server.mjs && node --check api/sync.mjs && node --check api/notes.mjs && node --check lib/sync.mjs && node --check lib/notes.mjs && node --check public/app.mjs && node --check public/queue.mjs && node --check public/notes-queue.mjs && node --check public/note-text.mjs && node --check public/sw.js"
+  }
+}
